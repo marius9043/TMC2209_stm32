@@ -884,24 +884,24 @@ void TMC2209::sendDatagramBidirectional(Datagram & datagram,
   serialFlush();
 
   // wait for bytes sent out on TX line to be echoed on RX line
-  uint32_t echo_delay = 0;
-  while ((serialAvailable() < datagram_size) and
-    (echo_delay < ECHO_DELAY_MAX_MICROSECONDS))
-  {
-    delayMicroseconds(ECHO_DELAY_INC_MICROSECONDS);
-    echo_delay += ECHO_DELAY_INC_MICROSECONDS;
-  }
+  // uint32_t echo_delay = 0;
+  // while ((serialAvailable() < datagram_size) and
+  //  (echo_delay < ECHO_DELAY_MAX_MICROSECONDS))
+  // {
+  //  delayMicroseconds(ECHO_DELAY_INC_MICROSECONDS);
+  //  echo_delay += ECHO_DELAY_INC_MICROSECONDS;
+  // }
 
-  if (echo_delay >= ECHO_DELAY_MAX_MICROSECONDS)
-  {
-    return;
-  }
+  // if (echo_delay >= ECHO_DELAY_MAX_MICROSECONDS)
+  // {
+  //   return;
+  // }
 
   // clear RX buffer of echo bytes
-  for (uint8_t i=0; i<datagram_size; ++i)
-  {
-    byte = serialRead();
-  }
+  // for (uint8_t i=0; i<datagram_size; ++i)
+  // {
+  //   byte = serialRead();
+  // }
 }
 
 void TMC2209::write(uint8_t register_address,
@@ -931,8 +931,25 @@ uint32_t TMC2209::read(uint8_t register_address)
 
   for (uint8_t retry = 0; retry < MAX_READ_RETRIES; retry++)
   {
+    // This now sends the request without handling echo internally
     sendDatagramBidirectional(read_request_datagram, READ_REQUEST_DATAGRAM_SIZE);
+    
+    // ------ START OF ADDED/MODIFIED CODE ------
+#if defined(ARDUINO_ARCH_STM32) // Use appropriate define for your STM32 core
+    if (hardware_serial_ptr_ != nullptr)
+    {
+      // Clear buffer right before enabling RX, just in case
+      while (serialAvailable() > 0)
+      {
+        serialRead();
+      }
+      // Enable Half-Duplex Receive mode
+      hardware_serial_ptr_->enableHalfDuplexRx();
+    }
+#endif
+    // ------- END OF ADDED/MODIFIED CODE -------
 
+    // Wait for the reply datagram to arrive
     uint32_t reply_delay = 0;
     while ((serialAvailable() < WRITE_READ_REPLY_DATAGRAM_SIZE) and
       (reply_delay < REPLY_DELAY_MAX_MICROSECONDS))
@@ -941,31 +958,92 @@ uint32_t TMC2209::read(uint8_t register_address)
       reply_delay += REPLY_DELAY_INC_MICROSECONDS;
     }
 
+    // if (reply_delay >= REPLY_DELAY_MAX_MICROSECONDS)
+    // {
+    //   return 0;
+    // }
     if (reply_delay >= REPLY_DELAY_MAX_MICROSECONDS)
     {
-      return 0;
+      // If timed out, continue to the next retry attempt
+      if (retry < MAX_READ_RETRIES - 1)
+      {
+        delay(READ_RETRY_DELAY_MS);
+        continue;
+      }
+      else
+      {
+        // Failed all retries
+        return 0; // Or indicate error differently
+      }
     }
 
-    uint64_t byte;
+
+    // uint64_t byte;
+    // uint8_t byte_count = 0;
+    // WriteReadReplyDatagram read_reply_datagram;
+    // read_reply_datagram.bytes = 0;
+    // for (uint8_t i=0; i<WRITE_READ_REPLY_DATAGRAM_SIZE; ++i)
+    // {
+    //   byte = serialRead();
+    //   read_reply_datagram.bytes |= (byte << (byte_count++ * BITS_PER_BYTE));
+    // }
+
+    // auto crc = calculateCrc(read_reply_datagram, WRITE_READ_REPLY_DATAGRAM_SIZE);
+    // if (crc == read_reply_datagram.crc)
+    // {
+    //   return reverseData(read_reply_datagram.data);
+    // }
+    // 
+    // delay(READ_RETRY_DELAY_MS);
+  // }
+
+  // return 0;
+// }
+    // If bytes are available, read them
+    uint64_t byte_read = 0; // Use appropriate type
     uint8_t byte_count = 0;
     WriteReadReplyDatagram read_reply_datagram;
     read_reply_datagram.bytes = 0;
-    for (uint8_t i=0; i<WRITE_READ_REPLY_DATAGRAM_SIZE; ++i)
+
+    // Read the reply bytes (consider adding per-byte timeout if needed)
+    // This assumes serialAvailable() returning >= expected size means data is ready
+    for (uint8_t i = 0; i < WRITE_READ_REPLY_DATAGRAM_SIZE; ++i)
     {
-      byte = serialRead();
-      read_reply_datagram.bytes |= (byte << (byte_count++ * BITS_PER_BYTE));
+      // Reading one byte at a time
+      int single_byte = serialRead();
+      if (single_byte != -1)
+      { // Check if read was successful
+        read_reply_datagram.bytes |= ((uint64_t)single_byte << (byte_count++ * BITS_PER_BYTE));
+      }
+      else
+      {
+        // Error reading byte (e.g., timeout if serialRead has one)
+        // Break or handle error - relying on outer timeout for now
+        byte_count = 0; // Mark as incomplete read
+        break;
+      }
     }
 
-    auto crc = calculateCrc(read_reply_datagram, WRITE_READ_REPLY_DATAGRAM_SIZE);
-    if (crc == read_reply_datagram.crc)
+    // Check CRC only if we received the expected number of bytes
+    if (byte_count == WRITE_READ_REPLY_DATAGRAM_SIZE)
     {
-      return reverseData(read_reply_datagram.data);
+      auto crc = calculateCrc(read_reply_datagram, WRITE_READ_REPLY_DATAGRAM_SIZE);
+      if (crc == read_reply_datagram.crc)
+      {
+        // Success! Return the data.
+        return reverseData(read_reply_datagram.data);
+      }
+      // CRC error - fall through to retry delay
+    }
+    // Incomplete read or CRC error, delay before next retry
+    if (retry < MAX_READ_RETRIES - 1)
+    {
+      delay(READ_RETRY_DELAY_MS);
     }
 
-    delay(READ_RETRY_DELAY_MS);
-  }
+  } // End retry loop
 
-  return 0;
+  return 0; // Return 0 if all retries fail
 }
 
 uint8_t TMC2209::percentToCurrentSetting(uint8_t percent)
